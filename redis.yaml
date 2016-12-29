@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
+  name: redis
+  labels:
+    app: redis
+spec:
+  ports:
+  - port: 6379
+    name: peer
+  - port: 16379
+    name: cluster
+  # *.redis.default.svc.cluster.local
+  clusterIP: None
+  selector:
+    app: redis
+---
+apiVersion: v1
+data:
+  cluster.conf: |
+    port 6379
+    appendonly yes
+    cluster-enabled yes
+    cluster-config-file /var/lib/redis/nodes.conf
+    cluster-node-timeout 5000
+    dir /var/lib/redis
+kind: ConfigMap
+metadata:
+  name: redis-conf
+  labels:
+    app: redis
+  namespace: default
+---
+apiVersion: apps/v1beta1
+kind: StatefulSet
+metadata:
+  name: redis
+spec:
+  serviceName: redis
+  replicas: 7
+  template:
+    metadata:
+      labels:
+        app: redis
+        role: node
+    spec:
+      containers:
+        - name: redis
+          image: sporkmonger/redis-k8s:3.2.6
+          imagePullPolicy: Always
+          args:
+            - "redis-server"
+            - "/etc/redis/cluster.conf"
+            - "--protected-mode"
+            - "no"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "100Mi"
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: "TCP"
+            - name: cluster
+              containerPort: 16379
+              protocol: "TCP"
+          volumeMounts:
+            - name: "conf"
+              mountPath: "/etc/redis"
+            - name: "data"
+              mountPath: "/var/lib/redis"
+        - name: "cluster-meet"
+          image: sporkmonger/redis-k8s:3.2.6
+          imagePullPolicy: Always
+          command:
+          - bash
+          - "-c"
+          - |
+            set -e
+            peer-finder -on-start="/usr/local/bin/cluster-meet.sh" -service=redis -ns=default
+            # Don't crash loop
+            sleep infinity
+      volumes:
+        - name: "data"
+          persistentVolumeClaim:
+            claimName: "data"
+        - name: "conf"
+          configMap:
+            name: "redis-conf"
+            items:
+              - key: "cluster.conf"
+                path: "cluster.conf"
+  volumeClaimTemplates:
+  - metadata:
+      name: "data"
+      annotations:
+        volume.alpha.kubernetes.io/storage-class: anything
+    spec:
+      accessModes:
+        - "ReadWriteOnce"
+      resources:
+        requests:
+          storage: 20Gi
